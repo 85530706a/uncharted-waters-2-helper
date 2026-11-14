@@ -4,9 +4,10 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 
 from live import (
-    FLEET_POINTER, GOLD, FAME_BASE, LIVE_BASE, SAVE, build_trainer_main, prepare_trainer,
+    FLEET_POINTER, GOLD, FAME_BASE, LIVE_BASE, SAVE,
     trainer_chart_writes, trainer_discovery_writes, trainer_writes,
 )
+from patches import build_trainer_main, prepare_trainer
 from original_game import run_original
 from sea2 import read_slots
 

@@ -1,7 +1,7 @@
 import unittest
 from struct import pack_into, unpack_from
 
-from live import build_trainer_main
+from patches import build_trainer_main
 from sea2 import SAVE, SLOT_SIZE
 from story_destinations import CoastMap, read_ports, route_targets
 

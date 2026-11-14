@@ -10,7 +10,8 @@ from shutil import copymode
 from struct import pack, pack_into, unpack_from
 from tempfile import NamedTemporaryFile
 
-from live import COAST_TELEPORT, FLEET_BASE, FLEET_COUNT, FLEET_SIZE, LIVE_BASE, replace_game_file
+from live import COAST_TELEPORT, FLEET_BASE, FLEET_COUNT, FLEET_SIZE, LIVE_BASE
+from patches import replace_game_file
 from sea2 import HEADER_SIZE, HEROES, SAVE, SLOT_SIZE, read_slots, write_copy
 from story_destinations import CoastMap, read_ports, route_targets
 
