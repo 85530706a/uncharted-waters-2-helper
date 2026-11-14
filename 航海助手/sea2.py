@@ -8,10 +8,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from struct import iter_unpack, pack_into, unpack_from
 
+from layout import (FAME as FAME_OFFSET, FAME_STRIDE, GOLD, HEADER_SIZE, HERO, SLOT_COUNT, SLOT_HEADER_DATE,
+                    SLOT_HEADER_PORT, SLOT_HEADER_SIZE, SLOT_SIZE, STORY_PROGRESS)
+
 SAVE = Path(__file__).resolve().parent / ".原版资源" / "KOUKAI2.DAT"
-HEADER_SIZE = 0x97
-SLOT_SIZE = 0x8074
-SLOT_COUNT = 10
 FAME = ("trade", "piracy", "adventure")
 ORIGINAL_EXE_SHA256 = "16392e537eff22374047f4a6b59917741faaef411cb4a658f065a38e1e9b4806"
 HEROES = ("约翰", "卡特琳娜", "奥托", "恩斯特", "彼得", "阿兰")
@@ -35,19 +35,19 @@ def read_slots(data):
         raise ValueError("存档长度不匹配。此工具只支持 328991 字节的中文版。")
     slots = []
     for index in range(SLOT_COUNT):
-        header = index * 15
-        date = data[header + 1:header + 12]
+        header = data[index * SLOT_HEADER_SIZE:(index + 1) * SLOT_HEADER_SIZE]
+        date = header[SLOT_HEADER_DATE]
         if date == bytes(11):
             continue
         if not re.fullmatch(rb"[ 0-9][0-9]/ [ 0-9][0-9]/[0-9]{4}", date):
             raise ValueError(f"存档 {index + 1} 的日期格式无法识别。")
-        port = data[header + 13]
+        port = header[SLOT_HEADER_PORT]
         base = HEADER_SIZE + index * SLOT_SIZE
-        hero = data[base + 0x611]
+        hero = data[base + HERO]
         if hero >= len(HEROES) or (port >= 138 and port != 0xff):
             raise ValueError(f"存档 {index + 1} 的角色或港口编号无法识别。")
-        gold, = unpack_from("<I", data, base + 0x60a)
-        fame = unpack_from("<3H", data, base + 0x5b6 + hero * 14)
+        gold, = unpack_from("<I", data, base + GOLD)
+        fame = unpack_from("<3H", data, base + FAME_OFFSET + hero * FAME_STRIDE)
         slots.append(Slot(index + 1, date.decode("ascii"), hero, port, gold, fame))
     return slots
 
@@ -115,11 +115,11 @@ def edit_slot(data, number, *, gold=None, fame=None):
     if gold is not None:
         if not 0 <= gold <= 600_000_000:
             raise ValueError("金币必须介于 0 和 600000000。")
-        pack_into("<I", result, base + 0x60a, gold)
+        pack_into("<I", result, base + GOLD, gold)
     for category, value in (fame or {}).items():
         if category not in FAME or not 0 <= value <= 50_000:
             raise ValueError("声望类别无效，或数值超出 0 到 50000。")
-        offset = base + 0x5b6 + slot.hero * 14 + FAME.index(category) * 2
+        offset = base + FAME_OFFSET + slot.hero * FAME_STRIDE + FAME.index(category) * 2
         pack_into("<H", result, offset, value)
     return bytes(result)
 
@@ -185,7 +185,7 @@ def main():
             if slot is None:
                 raise ValueError(f"找不到存档槽 {args.slot}。")
             base = HEADER_SIZE + (slot.number - 1) * SLOT_SIZE
-            chapter, subsection, flags = unpack_from("<BBI", data, base + 0x30)
+            chapter, subsection, flags = unpack_from("<BBI", data, base + STORY_PROGRESS)
             bank = (args.data / f"SNR{slot.hero + 1}.DAT").read_bytes()
             result = {"hero": HEROES[slot.hero], "port": slot.port, "chapter_index": chapter,
                       "subsection_index": subsection, "flags": f"{flags:08x}",

@@ -15,19 +15,20 @@ import threading
 from pathlib import Path
 from struct import pack, pack_into, unpack_from
 
+import layout
+from layout import FLEET_COUNT, FLEET_POINTER, FLEET_SHIP_LIMIT, FLEET_SIZE, LIVE_BASE, SHIP_COUNT, SHIP_SIZE, SUPPLY_SIZE
 from patches import TELEPORT_SEGMENT, TRAINER_GATES, prepare_trainer, replace_game_file
 from sea2 import FAME, HEROES, HEADER_SIZE, SAVE, SLOT_SIZE, read_slots
 from story_destinations import CoastMap, read_ports, route_targets
 
 DATA_SEGMENT_DELTA = 0x3815
-LIVE_BASE = 0xca4
-GOLD = LIVE_BASE + 0x60a
-FAME_BASE = LIVE_BASE + 0x5b6
-FLEET_BASE, FLEET_SIZE, FLEET_COUNT = 0x2e76, 0x85, 70
-FLEET_POINTER = 0xc2d4
-SHIP_BASE, SHIP_SIZE, SHIP_COUNT = 0x5892, 22, 65
-SUPPLY_BASE, SUPPLY_SIZE = 0x52d4, 30
-FLEET_SHIP_LIMIT = 10
+# Data-segment addresses of the current game, derived from the save-slot layout.
+GOLD = LIVE_BASE + layout.GOLD
+FAME_BASE = LIVE_BASE + layout.FAME
+FLEET_BASE = LIVE_BASE + layout.FLEETS
+SHIP_BASE = LIVE_BASE + layout.SHIPS
+SUPPLY_BASE = LIVE_BASE + layout.SUPPLIES
+OFFICER_BASE = LIVE_BASE + layout.OFFICERS
 TRAINER_SWITCHES = (*TRAINER_GATES, "supplies", "cannon", "duel", "duel_guard", "teleport",
                     "daylight", "opening", "pins", "map", "route", "discoveries")
 TELEPORT_MAILBOX = 0xb0
@@ -51,7 +52,7 @@ def lock_fields(hero, values):
         if name == "gold" and 0 <= value <= 600_000_000:
             writes.append((GOLD, pack("<I", value)))
         elif name in FAME and 0 <= value <= 50_000:
-            offset = FAME_BASE + hero * 14 + FAME.index(name) * 2
+            offset = FAME_BASE + hero * layout.FAME_STRIDE + FAME.index(name) * 2
             writes.append((offset, pack("<H", value)))
         else:
             raise ValueError("金币范围为 0–600000000，各项声望范围为 0–50000。")
@@ -66,29 +67,37 @@ def player_fleet(state):
     return None
 
 
+def ship_slot_offset(fleet, slot):
+    return fleet + layout.FLEET_SHIPS + slot * layout.SHIP_SLOT_SIZE
+
+
+def ship_slot_active(state, ship_slot):
+    return state[ship_slot + layout.SHIP_SLOT_STATUS] & layout.SHIP_SLOT_STATE_MASK == layout.SHIP_SLOT_ACTIVE
+
+
 def refill_writes(state):
     fleet = player_fleet(state)
     if fleet is None:
         return []
 
     writes = []
-    for slot in range(10):
-        ship_slot = fleet + 0x2b + slot * 9
-        instance = state[ship_slot + 7]
-        if state[ship_slot + 8] & 0x30 != 0x10 or instance >= SHIP_COUNT:
+    for slot in range(FLEET_SHIP_LIMIT):
+        ship_slot = ship_slot_offset(fleet, slot)
+        instance = state[ship_slot + layout.SHIP_SLOT_INSTANCE]
+        if not ship_slot_active(state, ship_slot) or instance >= SHIP_COUNT:
             continue
         ship = SHIP_BASE + instance * SHIP_SIZE
-        capacity, = unpack_from("<H", state, ship + 20)
+        capacity, = unpack_from("<H", state, ship + layout.SHIP_CAPACITY)
         supply = SUPPLY_BASE + slot * SUPPLY_SIZE
         stores = unpack_from("<4H", state, supply)
-        cargo = sum(unpack_from("<5H", state, supply + 12))
+        cargo = sum(unpack_from("<5H", state, supply + layout.SUPPLY_CARGO))
         room = capacity * 10 - (stores[0] + stores[1] + (stores[2] + stores[3] + cargo) * 10)
         if room <= 0:
             continue
         # Water and food are recorded in tenths of a barrel, other stores in whole units.
         updated = list(stores)
         for field, target, unit in (
-            (0, 10, 1), (1, 10, 1), (2, 5, 10), (3, 10 if state[ship + 17] else 0, 10),
+            (0, 10, 1), (1, 10, 1), (2, 5, 10), (3, 10 if state[ship + layout.SHIP_CANNONS] else 0, 10),
             (0, 200, 1), (1, 200, 1),
         ):
             added = min(max(0, target - updated[field]), room // unit)
@@ -119,67 +128,76 @@ def outfit_fleet_save(data, number, *, ships=10, crew=150):
         raise ValueError(f"第 {number} 槽没有存档。")
     start = HEADER_SIZE + (number - 1) * SLOT_SIZE
     state = bytearray(bytes(LIVE_BASE) + data[start:start + SLOT_SIZE])
-    officers = LIVE_BASE + 0x612
-    fleet_id = state[officers + slot.hero * 50 + 44]
+    def officer(index):
+        return OFFICER_BASE + index * layout.OFFICER_SIZE
+
+    fleet_id = state[officer(slot.hero) + layout.OFFICER_FLEET]
     if fleet_id >= FLEET_COUNT:
         raise ValueError("这份存档还没有玩家舰队。")
     fleet = FLEET_BASE + fleet_id * FLEET_SIZE
-    if state[fleet + 42] != slot.hero:
+    if state[fleet + layout.FLEET_OWNER] != slot.hero:
         raise ValueError("存档的舰队归属无法确认。")
 
-    slots = [fleet + 43 + index * 9 for index in range(FLEET_SHIP_LIMIT)]
-    owned = [index for index, offset in enumerate(slots) if state[offset + 8] & 0x30 == 0x10]
+    slots = [ship_slot_offset(fleet, index) for index in range(FLEET_SHIP_LIMIT)]
+    owned = [index for index, offset in enumerate(slots) if ship_slot_active(state, offset)]
     if not owned:
         raise ValueError("请使用已有旗舰的存档。")
-    empty = [index for index in range(FLEET_SHIP_LIMIT) if state[slots[index] + 8] & 0x30 == 0]
+    empty = [index for index in range(FLEET_SHIP_LIMIT)
+             if state[slots[index] + layout.SHIP_SLOT_STATUS] & layout.SHIP_SLOT_STATE_MASK == 0]
     selected = owned + empty[:max(0, ships - len(owned))]
     if len(selected) < ships:
         raise ValueError("空闲船位不足，请先处理存档里未出航的船。")
-    instances = [state[slots[index] + 7] for index in owned]
-    if len(set(instances)) != len(owned) or any(index >= 40 for index in instances):
+    instances = [state[slots[index] + layout.SHIP_SLOT_INSTANCE] for index in owned]
+    if len(set(instances)) != len(owned) or any(index >= layout.SHIP_PLAYER_LIMIT for index in instances):
         raise ValueError("存档的船只编号无法确认。")
-    free = iter(index for index in range(40) if state[SHIP_BASE + index * SHIP_SIZE + 15] == 0xff
+    free = iter(index for index in range(layout.SHIP_PLAYER_LIMIT)
+                if state[SHIP_BASE + index * SHIP_SIZE + layout.SHIP_TYPE] == 0xff
                 and index not in instances)
     instances += [next(free, None) for _ in range(len(selected) - len(owned))]
     if None in instances:
         raise ValueError("存档的空闲船只记录不足。")
 
-    captain_offsets = [SUPPLY_BASE + index * SUPPLY_SIZE + 27 for index in selected]
-    candidates = [index for index in range(79, 120)
-                  if state[officers + index * 50 + 44] == 0xff
-                  and state[officers + index * 50 + 45] < 100
-                  and state[officers + index * 50 + 46] == 0]
+    captain_offsets = [SUPPLY_BASE + index * SUPPLY_SIZE + layout.SUPPLY_CAPTAIN for index in selected]
+    candidates = [index for index in range(layout.RECRUIT_FIRST, layout.OFFICER_COUNT)
+                  if state[officer(index) + layout.OFFICER_FLEET] == 0xff
+                  and state[officer(index) + 45] < 100
+                  and state[officer(index) + 46] == 0]
     random.shuffle(candidates)
     if sum(state[offset] == 0xff for offset in captain_offsets) > len(candidates):
         raise ValueError("可招募的空闲航海士不足。")
 
     for index, instance, captain_offset in zip(selected, instances, captain_offsets):
         ship = SHIP_BASE + instance * SHIP_SIZE
-        supply = captain_offset - 27
+        supply = captain_offset - layout.SUPPLY_CAPTAIN
         if index not in owned:
-            name = f"Reale {index + 1}".encode().ljust(15, b"\0")
-            state[ship:ship + 15] = name
+            name = f"Reale {index + 1}".encode()
+            state[ship + layout.SHIP_NAME.start:ship + layout.SHIP_NAME.stop] = name.ljust(
+                layout.SHIP_NAME.stop - layout.SHIP_NAME.start, b"\0")
             state[supply:supply + SUPPLY_SIZE] = bytes(22) + bytes([255]) * 6 + b"\x64\0"
         captain = state[captain_offset]
         if captain == 0xff:
             captain = candidates.pop()
             state[captain_offset] = captain
-            officer = officers + captain * 50
-            state[officer + 43:officer + 47] = bytes((100, fleet_id, 255, 2))
-        elif captain >= 120 or state[officers + captain * 50 + 44] != fleet_id:
+            record = officer(captain)
+            # +43 and +45..+46 are unconfirmed; +44 is the fleet assignment.
+            state[record + 43:record + 47] = bytes((100, fleet_id, 255, 2))
+        elif captain >= layout.OFFICER_COUNT or state[officer(captain) + layout.OFFICER_FLEET] != fleet_id:
             raise ValueError("存档的船长归属无法确认。")
-        officer = officers + captain * 50
-        state[officer + 28:officer + 36] = bytes([100]) * 8
-        for offset in (36, 37):
-            state[officer + offset] = max(100, state[officer + offset])
+        record = officer(captain)
+        abilities = record + layout.OFFICER_ABILITIES
+        state[abilities:abilities + 8] = bytes([100]) * 8
+        for offset in layout.OFFICER_EXTRA_STATS:
+            state[record + offset] = max(100, state[record + offset])
 
         # La Reale with the battle loadout from the supported DOS release.
-        cargo = sum(unpack_from("<5H", state, supply + 12))
+        cargo = sum(unpack_from("<5H", state, supply + layout.SUPPLY_CARGO))
         capacity = max(260, cargo + 70)
-        state[ship + 15:ship + 22] = pack("<BBBHH", 0x15, 0x42, 40, 150, capacity)
+        # Type 0x15, an unconfirmed byte, 40 cannons, an unconfirmed uint16, then capacity.
+        state[ship + layout.SHIP_TYPE:ship + SHIP_SIZE] = pack("<BBBHH", 0x15, 0x42, 40, 150, capacity)
         position = slots[index]
-        state[position:position + 9] = pack("<H7B", crew, 60, 60, 95, 100, 40,
-                                             instance, 0x10 | (state[position + 8] & 0xcf))
+        status = state[position + layout.SHIP_SLOT_STATUS] & ~layout.SHIP_SLOT_STATE_MASK & 0xff
+        state[position:position + layout.SHIP_SLOT_SIZE] = pack(
+            "<H7B", crew, 60, 60, 95, 100, 40, instance, layout.SHIP_SLOT_ACTIVE | status)
         water = (capacity - cargo - 60) * 5
         pack_into("<4H", state, supply, water, water, 5, 40)
         state[supply + 8:supply + 10] = b"\x19\x32"
@@ -190,8 +208,8 @@ def outfit_fleet_save(data, number, *, ships=10, crew=150):
 def trainer_chart_writes(state, ports):
     writes = []
     for relative, mask in (
-        (0x144, (b"\xff" * 11 + b"\xc0") * 45),
-        (0x3a2, b"\xff" * 77 + b"\xfc"),
+        (layout.CHART_MASK, (b"\xff" * 11 + b"\xc0") * 45),
+        (layout.CHART_EXTRA_MASK, b"\xff" * 77 + b"\xfc"),
     ):
         for index in range(0, len(mask), 48):
             offset = LIVE_BASE + relative + index
@@ -200,41 +218,42 @@ def trainer_chart_writes(state, ports):
             updated = bytes(value | visible for value, visible in zip(current, bits))
             if updated != current:
                 writes.append((offset, updated))
-    count = LIVE_BASE + 0x36a
+    count = LIVE_BASE + layout.CHART_COUNT
     if unpack_from("<H", state, count)[0] < 4050:
         writes.append((count, pack("<H", 4050)))
     for port, x, y in ports:
-        record = LIVE_BASE + 0x52b0 + port * 22
-        flag = state[record + 21]
-        if not flag & 0x10 and unpack_from("<HH", state, record) == (x, y):
-            writes.append((record + 21, bytes([flag | 0x10])))
+        record = LIVE_BASE + layout.PORTS + port * layout.PORT_SIZE
+        flag = state[record + layout.PORT_FLAGS]
+        if not flag & layout.PORT_CHARTED and unpack_from("<HH", state, record) == (x, y):
+            writes.append((record + layout.PORT_FLAGS, bytes([flag | layout.PORT_CHARTED])))
     return writes
 
 
 def trainer_discovery_writes(state):
     writes = []
-    start = LIVE_BASE + 0x72e8
-    for record in range(start, start + 98 * 7, 7):
+    start = LIVE_BASE + layout.DISCOVERIES
+    for record in range(start, start + layout.DISCOVERY_COUNT * layout.DISCOVERY_SIZE, layout.DISCOVERY_SIZE):
         x, y, treasure, _, flags = unpack_from("<HHBBB", state, record)
         # The engine selects 50 ordinary sites per campaign. Disabled sites
         # also serve as the pool for treasure placement and later events.
         if 90 <= treasure <= 99 and flags & 0xe0 == 0x60:
             # Old unlocks could put treasure sites in the ordinary report list.
             # Restore their reserved status and remove the spurious discovery.
-            writes.append((record + 6, bytes([(flags & 0x0f) | 0x80])))
+            writes.append((record + layout.DISCOVERY_FLAGS, bytes([(flags & 0x0f) | 0x80])))
             continue
         if treasure or flags & 0x80 or not (0 < x < 2160 and 0 < y < 1080):
             continue
         discovered = flags | 0x60
         if discovered != flags:
-            writes.append((record + 6, bytes([discovered])))
+            writes.append((record + layout.DISCOVERY_FLAGS, bytes([discovered])))
     return writes
 
 
 def game_hero(state):
-    if not (1 <= state[6] < 100 and state[7] < 12 and state[8] < 31 and state[9] < 72):
+    calendar = state[layout.CALENDAR:layout.CALENDAR + 4]
+    if not (1 <= calendar[0] < 100 and calendar[1] < 12 and calendar[2] < 31 and calendar[3] < 72):
         raise ValueError("请先在游戏里创建角色或读档。")
-    hero = state[0x611]
+    hero = state[layout.HERO]
     if hero >= len(HEROES):
         raise ValueError("当前角色无法识别。")
     return hero
@@ -280,7 +299,7 @@ class Debugger:
 
     def game_state(self):
         segment = self.data_segment()
-        state = self.read(segment, LIVE_BASE, 0x612)
+        state = self.read(segment, LIVE_BASE, layout.OFFICERS)
         return segment, game_hero(state), state
 
     def write(self, segment, offset, data):
@@ -333,8 +352,8 @@ def prompt(debugger):
 
             segment, hero, state = debugger.game_state()
             if command == "status":
-                gold, = unpack_from("<I", state, 0x60a)
-                trade, piracy, adventure = unpack_from("<3H", state, 0x5b6 + hero * 14)
+                gold, = unpack_from("<I", state, layout.GOLD)
+                trade, piracy, adventure = unpack_from("<3H", state, layout.FAME + hero * layout.FAME_STRIDE)
                 print(f"{HEROES[hero]} · 金币 {gold} · 商业 {trade} · 海盗 {piracy} · 冒险 {adventure}")
                 continue
 
@@ -397,7 +416,7 @@ def auto_refill(debugger, game, profile, *, teleport_folder=None):
         try:
             segment = debugger.data_segment()
             state = debugger.read(segment, 0, FLEET_POINTER + 2)
-            hero = game_hero(state[LIVE_BASE:LIVE_BASE + 0x612])
+            hero = game_hero(state[LIVE_BASE:LIVE_BASE + layout.OFFICERS])
         except ValueError:
             # Opening animation and title screen do not have a loaded character.
             if route_file is not None:
@@ -414,9 +433,9 @@ def auto_refill(debugger, game, profile, *, teleport_folder=None):
                     last_routes = routes
             fleet = player_fleet(state)
             if fleet is not None and teleport_folder is not None:
-                if any(state[fleet + 0x33 + ship * 9] & 0x30 == 0x10 for ship in range(10)):
+                if any(ship_slot_active(state, ship_slot_offset(fleet, ship)) for ship in range(FLEET_SHIP_LIMIT)):
                     deliver_teleport_request(debugger, teleport_folder, segment, coast=route_file is not None)
-            at_sea = fast and state[LIVE_BASE + 0x0a] == 0xff and fleet is not None
+            at_sea = fast and state[LIVE_BASE + layout.CURRENT_PORT] == 0xff and fleet is not None
             code_segment = segment - DATA_SEGMENT_DELTA + 0x1000
             if at_sea and fast_segment != code_segment:
                 # File offset 0x204b7: retry the voyage's FMDRV timer query.

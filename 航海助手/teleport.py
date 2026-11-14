@@ -10,7 +10,8 @@ from shutil import copymode
 from struct import pack, pack_into, unpack_from
 from tempfile import NamedTemporaryFile
 
-from live import COAST_TELEPORT, FLEET_BASE, FLEET_COUNT, FLEET_SIZE, LIVE_BASE
+import layout
+from live import COAST_TELEPORT
 from patches import replace_game_file
 from sea2 import HEADER_SIZE, HEROES, SAVE, SLOT_SIZE, read_slots, write_copy
 from story_destinations import CoastMap, read_ports, route_targets
@@ -114,33 +115,38 @@ def choose_story_destination(choices):
 
 def place_saved_fleet(data, slot, port, ship_x, ship_y):
     base = HEADER_SIZE + (slot.number - 1) * SLOT_SIZE
-    fleets = [base + FLEET_BASE - LIVE_BASE + i * FLEET_SIZE for i in range(FLEET_COUNT)]
+    fleets = [base + layout.FLEETS + i * layout.FLEET_SIZE for i in range(layout.FLEET_COUNT)]
+    status = layout.FLEET_SHIPS + layout.SHIP_SLOT_STATUS
     active = [
         fleet for fleet in fleets
-        if data[fleet + 0x2a] == slot.hero
-        and any(data[fleet + 0x33 + ship * 9] & 0x30 == 0x10 for ship in range(10))
+        if data[fleet + layout.FLEET_OWNER] == slot.hero
+        and any(data[fleet + status + ship * layout.SHIP_SLOT_SIZE] & layout.SHIP_SLOT_STATE_MASK
+                == layout.SHIP_SLOT_ACTIVE for ship in range(layout.FLEET_SHIP_LIMIT))
     ]
     if len(active) != 1:
         raise ValueError("这个存档里找不到可瞬移的主角船队。")
     fleet = active[0]
     result = bytearray(data)
-    result[(slot.number - 1) * 15 + 13] = port
-    result[base + 0x0a:base + 0x0c] = bytes((port, 0xff))
+    result[(slot.number - 1) * layout.SLOT_HEADER_SIZE + layout.SLOT_HEADER_PORT] = port
+    # The byte after the current port and the flags at +0x0f are unconfirmed.
+    result[base + layout.CURRENT_PORT:base + layout.CURRENT_PORT + 2] = bytes((port, 0xff))
     result[base + 0x0f] &= 0xc0
-    result[base + 0x361] = (result[base + 0x361] & 7) | (0x80 if port == 0xff else 0x20)
-    pack_into("<2H", result, base + 0x362, *map_origin(ship_x, ship_y))
+    mode = base + layout.MAP_MODE
+    result[mode] = (result[mode] & 7) | (0x80 if port == 0xff else 0x20)
+    pack_into("<2H", result, base + layout.MAP_ORIGIN, *map_origin(ship_x, ship_y))
     pack_into("<6H", result, fleet, ship_x, ship_y, 0, 0, ship_x, ship_y)
+    # Fleet +0x0c and +0x18..+0x1a are unconfirmed sailing fields; reset as in a fresh departure.
     pack_into("<H", result, fleet + 0x0c, 0)
     result[fleet + 0x18:fleet + 0x1b] = b"\0\0\x08"
     if port != 0xff:
-        result[base + 0x52b0 + port * 22 + 21] |= 0x50
+        result[base + layout.PORTS + port * layout.PORT_SIZE + layout.PORT_FLAGS] |= 0x50
     return bytes(result)
 
 
 def move_save(data, slot, destination):
     port, port_x, port_y, ship_x, ship_y, _ = destination
     base = HEADER_SIZE + (slot.number - 1) * SLOT_SIZE
-    if unpack_from("<HH", data, base + 0x52b0 + port * 22) != (port_x, port_y):
+    if unpack_from("<HH", data, base + layout.PORTS + port * layout.PORT_SIZE) != (port_x, port_y):
         raise ValueError("港口位置与中文版存档不符。")
     return place_saved_fleet(data, slot, port, ship_x, ship_y)
 

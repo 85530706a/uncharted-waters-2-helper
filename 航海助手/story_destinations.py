@@ -3,6 +3,7 @@
 from pathlib import Path
 from struct import unpack_from
 
+import layout
 from sea2 import story_entries
 
 ROOT = Path(__file__).resolve().parent
@@ -23,8 +24,10 @@ def read_ports():
 def route_targets(state, bank, ports, coast=None):
     """Return selectable labels and their harbor IDs for a save-slot body."""
     targets = {}
-    inventory = set(state[0x21b3:0x21c7])
-    for offset in range(0x72e8, 0x72e8 + 98 * 7, 7):
+    inventory = set(state[layout.INVENTORY])
+    discoveries = range(layout.DISCOVERIES, layout.DISCOVERIES + layout.DISCOVERY_COUNT * layout.DISCOVERY_SIZE,
+                        layout.DISCOVERY_SIZE)
+    for offset in discoveries:
         x, y, item, _, flags = unpack_from("<HHBBB", state, offset)
         if (not 90 <= item < 90 + len(MAP_NAMES) or item - 10 not in inventory
                 or item in inventory or not flags & 0x80
@@ -45,13 +48,13 @@ def route_targets(state, bank, ports, coast=None):
             targets[f"直达藏宝点 · {treasure}（{x}, {y}）"] = water
         targets[f"{treasure} · {name.split(' / ')[0]}出海后{direction}（{x}, {y}）"] = port
 
-    chapter, subsection = state[0x30:0x32]
+    chapter, subsection = state[layout.STORY_PROGRESS:layout.STORY_PROGRESS + 2]
     for entry in story_entries(bank, chapter, subsection):
         port = entry.get("port")
         if port not in ports or "building" not in entry:
             continue
         building = entry["building"]
-        if port == 0 and building == "特殊设施" and state[0x611] in (0, 4):
+        if port == 0 and building == "特殊设施" and state[layout.HERO] in (0, 4):
             building = "法雷尔公爵宅"
         name = ports[port][-1].split(" / ")[0]
         targets[f"剧情候选 · {name} · {building}"] = port
