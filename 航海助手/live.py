@@ -166,6 +166,22 @@ def outfit_fleet_save(data, number, *, ships=10, crew=150):
     if sum(state[offset] == 0xff for offset in captain_offsets) > len(candidates):
         raise ValueError("可招募的空闲航海士不足。")
 
+    roster_start = LIVE_BASE + layout.PERSONNEL.start
+    roster_end = LIVE_BASE + layout.PERSONNEL.stop
+    roster = set(state[roster_start:roster_end])
+    vacancies = iter(offset for offset in range(roster_start, roster_end) if state[offset] == 0xff)
+
+    def enlist(member):
+        """Add a fleet member to the personnel menu so the game lists and pays them."""
+        if member == slot.hero or member in roster:
+            return
+        vacancy = next(vacancies, None)
+        if vacancy is None:
+            raise ValueError("航海士名单已满，请先腾出名额再整备舰队。")
+        state[vacancy] = member
+        state[LIVE_BASE + layout.PERSONNEL_WAGES + vacancy - roster_start] = 2
+        roster.add(member)
+
     for index, instance, captain_offset in zip(selected, instances, captain_offsets):
         ship = SHIP_BASE + instance * SHIP_SIZE
         supply = captain_offset - layout.SUPPLY_CAPTAIN
@@ -183,6 +199,7 @@ def outfit_fleet_save(data, number, *, ships=10, crew=150):
             state[record + 43:record + 47] = bytes((100, fleet_id, 255, 2))
         elif captain >= layout.OFFICER_COUNT or state[officer(captain) + layout.OFFICER_FLEET] != fleet_id:
             raise ValueError("存档的船长归属无法确认。")
+        enlist(captain)
         record = officer(captain)
         abilities = record + layout.OFFICER_ABILITIES
         state[abilities:abilities + 8] = bytes([100]) * 8
@@ -202,6 +219,11 @@ def outfit_fleet_save(data, number, *, ships=10, crew=150):
         pack_into("<4H", state, supply, water, water, 5, 40)
         state[supply + 8:supply + 10] = b"\x19\x32"
         pack_into("<H", state, supply + 10, crew + capacity + 25)
+
+    # Officers can belong to the fleet without commanding a ship; list them too.
+    for member in range(layout.OFFICER_COUNT):
+        if state[officer(member) + layout.OFFICER_FLEET] == fleet_id:
+            enlist(member)
     return data[:start] + state[LIVE_BASE:] + data[start + SLOT_SIZE:]
 
 

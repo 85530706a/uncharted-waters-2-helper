@@ -44,6 +44,7 @@ def make_save(*, owned=1, recruits=41):
     data[header + L.SLOT_HEADER_PORT] = 1
     base = slot_base()
     data[base + L.HERO] = HERO
+    data[base + L.PERSONNEL.start:base + L.PERSONNEL.stop] = bytes([0xff]) * 30
     for index in range(L.OFFICER_COUNT):
         data[officer(index) + L.OFFICER_FLEET] = 0xff
     data[officer(HERO) + L.OFFICER_FLEET] = FLEET_ID
@@ -118,6 +119,41 @@ class OutfitFleetTests(unittest.TestCase):
         self.assertEqual(result[ship_slot(0) + L.SHIP_SLOT_STATUS], L.SHIP_SLOT_ACTIVE | 0x01)
         self.assertEqual(unpack_from("<5H", result, supply(0) + L.SUPPLY_CARGO), (5, 0, 0, 0, 0))
         self.assertEqual(result[ship(result[ship_slot(1) + L.SHIP_SLOT_INSTANCE]):][:7], b"Reale 2")
+
+    def test_registers_new_and_existing_captains_in_personnel_roster(self):
+        before = bytearray(make_save(owned=2))
+        existing = L.RECRUIT_FIRST
+        before[supply(1) + L.SUPPLY_CAPTAIN] = existing
+        before[officer(existing) + L.OFFICER_FLEET] = FLEET_ID
+        roster = slot_base() + L.PERSONNEL.start
+        before[roster:roster + 30] = bytes([0xff]) * 30
+        before[roster] = 77
+
+        result = outfit_fleet_save(bytes(before), SLOT, ships=4)
+        captains = [result[supply(i) + L.SUPPLY_CAPTAIN] for i in range(1, 4)]
+        self.assertEqual(captains[0], existing)
+        self.assertEqual(list(result[roster:roster + 4]), [77, *captains])
+        self.assertEqual(outfit_fleet_save(result, SLOT, ships=4), result)
+
+    def test_lists_fleet_members_who_command_no_ship(self):
+        before = bytearray(make_save(owned=1))
+        roster = slot_base() + L.PERSONNEL.start
+        wages = slot_base() + L.PERSONNEL_WAGES
+        listed, unlisted = 77, 102
+        for member in (listed, unlisted):
+            before[officer(member) + L.OFFICER_FLEET] = FLEET_ID
+            before[officer(member) + 46] = 6
+        before[roster] = listed
+        before[wages] = 12
+
+        result = outfit_fleet_save(bytes(before), SLOT, ships=3)
+        names = [member for member in result[roster:roster + 30] if member != 0xff]
+        captains = [result[supply(i) + L.SUPPLY_CAPTAIN] for i in range(1, 3)]
+        self.assertEqual(names, [listed, *captains, unlisted])
+        self.assertEqual(result[wages], 12)
+        self.assertEqual(result[wages + names.index(unlisted)], 2)
+        self.assertNotIn(HERO, names)
+        self.assertEqual(result[officer(unlisted) + 46], 6)
 
     def test_changes_only_the_selected_slot(self):
         before = make_save()

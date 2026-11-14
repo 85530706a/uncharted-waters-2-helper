@@ -44,6 +44,8 @@ OFFICER_EXTRA_STATS = (36, 37)  # 整备舰队时至少设为 100，含义未确
 # +43、+45、+46 含义未确认：新船长写入 100、0xff、2；可招募者 +45 小于 100 且 +46 为 0。
 
 # ---- 槽内：舰队 ----
+PERSONNEL = slice(0x2177, 0x2195)  # 人物菜单使用的航海士编号，0xff 表示空位。
+PERSONNEL_WAGES = 0x2195  # 与人物名单同序，工资以 10 枚金币为单位。
 INVENTORY = slice(0x21b3, 0x21c7)  # 持有物品编号。
 FLEETS = 0x21d2
 FLEET_SIZE = 0x85
