@@ -1,9 +1,7 @@
 import os
 import pty
-import tempfile
 import threading
 import unittest
-from pathlib import Path
 from struct import pack, pack_into, unpack
 from unittest.mock import Mock
 
@@ -40,10 +38,7 @@ class AutoResourcesTests(unittest.TestCase):
         pack_into("<H", self.state, 0x52d4 + 12, 12)
 
     def test_replenishes_player_only_and_respects_ship_capacity(self):
-        writes = dict(live.refill_writes(self.state, 1))
-        self.assertEqual(writes[0x12ae], pack("<I", 10_000_000))
-        self.assertEqual(writes[0x1268], pack("<3H", 50000, 50000, 50000))
-        self.assertNotIn(0x125a, writes)
+        writes = dict(live.refill_writes(self.state))
         self.assertNotIn(0x52f2, writes)
         water, food, lumber, shot = unpack("<4H", writes[0x52d4])
         self.assertGreaterEqual(min(water, food), 10)
@@ -58,19 +53,19 @@ class AutoResourcesTests(unittest.TestCase):
         game = Mock()
         game.poll.side_effect = [None, 0]
 
-        live.auto_refill(debugger, game)
+        live.auto_refill(debugger, game, {"supplies": True, "gold": 10_000_000})
 
         debugger.command.assert_not_called()
         debugger.write.assert_any_call(0x41de, live.GOLD, pack("<I", 10_000_000))
 
     def test_title_screen_with_no_fleet_pointer_is_ignored(self):
         pack_into("<H", self.state, 0xc2d4, 0)
-        self.assertEqual(live.refill_writes(self.state, 1), [])
+        self.assertEqual(live.refill_writes(self.state), [])
 
     def test_full_ship_preserves_cargo_and_existing_supplies(self):
         pack_into("<4H", self.state, 0x52d4, 30, 40, 1, 2)
         pack_into("<H", self.state, 0x52d4 + 12, 30)
-        writes = dict(live.refill_writes(self.state, 1))
+        writes = dict(live.refill_writes(self.state))
         self.assertNotIn(0x52d4, writes)
 
     def test_terminal_drain_stops_even_while_slave_is_open(self):
@@ -104,21 +99,11 @@ class AutoResourcesTests(unittest.TestCase):
         game = Mock()
         game.poll.side_effect = [None, None, None, None, 0]
 
-        live.auto_refill(debugger, game)
+        live.auto_refill(debugger, game, {"fast": True})
 
         speed_writes = [call.args for call in debugger.write.call_args_list if call.args[1] == 0xb2b7]
         self.assertEqual(speed_writes, [(0x19c9, 0xb2b7, b"\x90\x90"), (0x19c9, 0xb2b7, b"\x75\xf7")])
         debugger.command.assert_not_called()
-
-    def test_patch_backup_and_repeat_launch(self):
-        original = live.SAVE.with_name("MAIN.EXE").read_bytes()
-        with tempfile.TemporaryDirectory() as tmp:
-            exe = Path(tmp) / "MAIN.EXE"
-            exe.write_bytes(original)
-            live.prepare_provisions(exe)
-            live.prepare_provisions(exe)
-            self.assertEqual(exe.read_bytes(), live.patch_provisions(original))
-            self.assertEqual(exe.with_suffix(".original.EXE").read_bytes(), original)
 
 
 if __name__ == "__main__":

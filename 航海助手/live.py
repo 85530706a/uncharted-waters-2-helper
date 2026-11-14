@@ -17,7 +17,6 @@ from pathlib import Path
 from struct import pack, pack_into, unpack_from
 
 from sea2 import FAME, HEROES, HEADER_SIZE, ORIGINAL_EXE_SHA256, SAVE, SLOT_SIZE, patch_provisions, read_slots
-from story import StoryPilot
 from story_destinations import CoastMap, read_ports, route_targets
 
 DATA_SEGMENT_DELTA = 0x3815
@@ -37,10 +36,6 @@ TRAINER_GATES = {
 }
 TRAINER_SWITCHES = (*TRAINER_GATES, "supplies", "cannon", "duel", "duel_guard", "teleport",
                     "daylight", "opening", "pins", "map", "route", "discoveries")
-GOLD_FLOOR = 10_000_000
-JOHN_GOLD_FLOOR = 600_000_000
-ALI_GOLD_FLOOR = 9_990_000
-FAME_FLOOR = 50_000
 TELEPORT_SEGMENT = 0x18
 TELEPORT_MAILBOX = 0xb0
 COAST_TELEPORT = 0xff
@@ -78,25 +73,12 @@ def player_fleet(state):
     return None
 
 
-def refill_writes(state, hero, *, legacy=True):
+def refill_writes(state):
     fleet = player_fleet(state)
     if fleet is None:
         return []
 
     writes = []
-    if legacy:
-        gold, = unpack_from("<I", state, GOLD)
-        gold_floor = {
-            HEROES.index("约翰"): JOHN_GOLD_FLOOR,
-            HEROES.index("阿兰"): ALI_GOLD_FLOOR,
-        }.get(hero, GOLD_FLOOR)
-        if gold < gold_floor:
-            writes.append((GOLD, pack("<I", gold_floor)))
-        fame_offset = FAME_BASE + hero * 14
-        fame = unpack_from("<3H", state, fame_offset)
-        if min(fame) < FAME_FLOOR:
-            writes.append((fame_offset, pack("<3H", *(max(value, FAME_FLOOR) for value in fame))))
-
     for slot in range(10):
         ship_slot = fleet + 0x2b + slot * 9
         instance = state[ship_slot + 7]
@@ -131,7 +113,7 @@ def trainer_writes(state, hero, profile):
         if int.from_bytes(state[offset:offset + len(value)], "little") < int.from_bytes(value, "little")
     ]
     if "supplies" in profile:
-        writes.extend(refill_writes(state, hero, legacy=False))
+        writes.extend(refill_writes(state))
     return writes
 
 
@@ -349,39 +331,24 @@ def protect_ali_ships(image):
     return bytes(result)
 
 
-def patch_ali_voyage(image, *, immune=True):
-    # Preserve the previous patch bytes to recognize installations on upgrade.
+def patch_ali_voyage(image):
     payload = bytes.fromhex(
-        "80 3e b5 12 05 75 02 b0 28 a2 ac bd 8b 1e d4 c2 cb"
-        "08 c0 75 09 80 3e b5 12 05 75 02 fe c0 88 45 02 08 c0 cb"
-        "e8 0d 00 83 c6 09 cb"
-        "e8 06 00 5e 5f 89 ec 5d cb"
-        "29 04 75 09 80 3e b5 12 05 75 02 ff 04 c3"
+        "80 3e b5 12 05 75 02 b0 28 a2 ac bd 8b 1e d4 c2 cb"  # Max speed.
+        "80 3e b5 12 05 75 06 81 46 ec 80 01 cb 8a 45 02 28 e4 cb"  # Skip storm damage.
+        "80 3e b5 12 05 74 02 29 04 83 c6 09 cb"  # Skip scurvy casualties.
+        "80 3e b5 12 05 74 02 29 04 5e 5f 89 ec 5d cb"  # Skip ration casualties.
+        "80 3e b5 12 05 75 11 80 7e f4 03 74 0b 80 7e f4 04 74 05"
+        "b8 01 00 eb 03 ff 5e f6 09 c0 cb"  # Report harmful sea events without applying them.
+        "89 f3 8b 46 fc 80 3e b5 12 05 75 04 83 46 f4 04 cb"  # Keep a missing ship.
     )
     hooks = (
         (0x36bd6, "a2acbd8b1ed4c2", 0, 0x9a),  # Speed after the heading check.
-        (0x1eed3, "8845020ac0", 17, 0x9a),  # Storm hull damage.
+        (0x1ee6d, "8a45022ae4", 17, 0x9a),  # Storm hull damage.
         (0x1e6fa, "290483c609", 36, 0x9a),  # Scurvy casualties.
-        (0x1e24e, "29045e5f8be55dcb", 43, 0xea),  # Food/water-related casualties.
+        (0x1e24e, "29045e5f8be55dcb", 49, 0xea),  # Food/water-related casualties.
+        (0x360c4, "ff5ef60bc0", 64, 0x9a),  # Harmful sea events.
+        (0x1eaf3, "8bde8b46fc", 94, 0x9a),  # Missing ship.
     )
-    if immune:
-        payload = bytes.fromhex(
-            "80 3e b5 12 05 75 02 b0 28 a2 ac bd 8b 1e d4 c2 cb"  # Max speed.
-            "80 3e b5 12 05 75 06 81 46 ec 80 01 cb 8a 45 02 28 e4 cb"  # Skip storm damage.
-            "80 3e b5 12 05 74 02 29 04 83 c6 09 cb"  # Skip scurvy casualties.
-            "80 3e b5 12 05 74 02 29 04 5e 5f 89 ec 5d cb"  # Skip ration casualties.
-            "80 3e b5 12 05 75 11 80 7e f4 03 74 0b 80 7e f4 04 74 05"
-            "b8 01 00 eb 03 ff 5e f6 09 c0 cb"  # Report harmful sea events without applying them.
-            "89 f3 8b 46 fc 80 3e b5 12 05 75 04 83 46 f4 04 cb"  # Keep a missing ship.
-        )
-        hooks = (
-            hooks[0],
-            (0x1ee6d, "8a45022ae4", 17, 0x9a),
-            (0x1e6fa, "290483c609", 36, 0x9a),
-            (0x1e24e, "29045e5f8be55dcb", 49, 0xea),
-            (0x360c4, "ff5ef60bc0", 64, 0x9a),
-            (0x1eaf3, "8bde8b46fc", 94, 0x9a),
-        )
     padding = 0x3b950
     if image[padding:padding+len(payload)] != bytes(len(payload)):
         raise ValueError("航行保护补丁的程序版本不匹配。")
@@ -628,57 +595,6 @@ def move_patches_out_of_video_buffer(image, original, *, teleport=False, facing=
     return bytes(header) + prefix + bytes(module)
 
 
-def enable_john_protection(image):
-    # Use unused bytes in the relocated code, outside the teleport mailbox.
-    header = unpack_from("<H", image, 8)[0] * 16
-    result = bytearray(image)
-    gate = bytes.fromhex("803eb51205")
-    checks = (0x83, 0xb3, 0xd3, 0xea, 0x110, 0x121, 0x134, 0x141, 0x150, 0x173)
-    helper = header + 0x221
-    code = bytes.fromhex("803eb51200 7405 803eb51205 c3")
-    if (result[helper:helper + len(code)] != bytes(len(code))
-            or any(result[header + offset:header + offset + len(gate)] != gate for offset in checks)):
-        raise ValueError("约翰保护补丁的程序版本不匹配。")
-    result[helper:helper + len(code)] = code
-    for offset in checks:
-        start = header + offset
-        result[start:start + 5] = b"\xe8" + pack("<h", helper - start - 3) + b"\x90\x90"
-
-    # João has scripted duels ashore. The damage routine identifies the
-    # attacking sailor the same way in town and at sea.
-    town_duel = header + 0xa4
-    port_check = header + 0x239  # After the nine-byte teleport mailbox.
-    sea_test = header + 0xba
-    code = bytes.fromhex("803eb51200 7403 e9") + pack("<h", port_check - town_duel - 10) + b"\xc3"
-    port_code = bytes.fromhex("803eae0cff c3")
-    if (result[town_duel:town_duel + len(code)] != b"\x90" * len(code)
-            or result[port_check:port_check + len(port_code)] != bytes(len(port_code))
-            or result[sea_test:sea_test + 5] != bytes.fromhex("803eae0cff")):
-        raise ValueError("约翰陆上单挑补丁的程序版本不匹配。")
-    result[town_duel:town_duel + len(code)] = code
-    result[port_check:port_check + len(port_code)] = port_code
-    result[sea_test:sea_test + 5] = b"\xe8" + pack("<h", town_duel - sea_test - 3) + b"\x90\x90"
-    return bytes(result)
-
-
-def enable_catalina_protection(image):
-    header = unpack_from("<H", image, 8)[0] * 16
-    helper = header + 0x221
-    extension = header + 0x270  # Padding after the direct teleport code.
-    old_code = bytes.fromhex("803eb51200 7405 803eb51205 c3")
-    code = bytes.fromhex(
-        "803eb51201 7703 38c0 c3"  # João and Catalina return with ZF set.
-        "803eb51205 c3"  # Ali also returns with ZF set.
-    )
-    if (image[helper:helper + len(old_code)] != old_code
-            or image[extension:extension + len(code)] != bytes(len(code))):
-        raise ValueError("卡特琳娜保护补丁的程序版本不匹配。")
-    result = bytearray(image)
-    result[helper:helper + 3] = b"\xe9" + pack("<h", extension - helper - 3)
-    result[extension:extension + len(code)] = code
-    return bytes(result)
-
-
 def repair_massawa_in_town(image):
     header = unpack_from("<H", image, 8)[0] * 16
     result = bytearray(image)
@@ -724,25 +640,6 @@ def open_buildings_at_all_hours(image):
     return image[:address] + b"\x90" * 4 + image[address + 4:]
 
 
-def smooth_town_walking(image):
-    # Use the engine's faster four-tick town cadence while still updating
-    # the walking sprite when the graphics-delay option is turned off.
-    shift = (unpack_from("<H", image, 8)[0] + unpack_from("<H", image, 0x16)[0]) * 16 - 0x5200
-    result = bytearray(image)
-    for address, before, after in (
-        (0x20c58, "a0a40c24013c011bc024fc050800", "b804009090909090909090909090"),
-        (0xe718, "740f", "9090"),
-    ):
-        start = address + shift
-        expected = bytes.fromhex(before)
-        replacement = bytes.fromhex(after)
-        end = start + len(expected)
-        if len(expected) != len(replacement) or result[start:end] != expected:
-            raise ValueError("港内步行补丁的程序版本不匹配。")
-        result[start:end] = replacement
-    return bytes(result)
-
-
 def prepare_story_hours(folder):
     changes = {
         "SNR1.DAT": (
@@ -770,65 +667,6 @@ def prepare_story_hours(folder):
             result[address:end] = replacement
         if result != image:
             replace_game_file(path, result)
-
-
-def prepare_provisions(exe, *, pin_ports=False, ali_combat=False):
-    original = SAVE.with_name("MAIN.EXE").read_bytes()
-    patched = patch_provisions(original)
-    image = exe.read_bytes()
-    pinned = pin_navigation_ports(patched)
-    combat = patch_ali_combat(pinned)
-    previous = move_patches_out_of_video_buffer(
-        patch_ali_voyage(protect_ali_ships(combat)), original)
-    desired = pinned if pin_ports else patched
-    if ali_combat:
-        desired = patch_ali_voyage(protect_ali_ships(patch_ali_combat(desired)))
-        desired = open_buildings_at_all_hours(keep_daylight(desired))
-        previous_walking = move_patches_out_of_video_buffer(desired, original, teleport=True)
-        previous_facing = smooth_town_walking(move_patches_out_of_video_buffer(
-            desired, original, teleport=True, facing=True))
-        previous_town_exit = move_patches_out_of_video_buffer(desired, original, town_exit=True)
-        previous_direct = move_patches_out_of_video_buffer(desired, original, town_exit=True, direct=True)
-        previous_protection = enable_john_protection(previous_direct)
-        previous_catalina = enable_catalina_protection(previous_protection)
-        repaired_direct = move_patches_out_of_video_buffer(
-            desired, original, town_exit=True, direct=True, repair_massawa=True)
-        previous_massawa = enable_catalina_protection(enable_john_protection(repaired_direct))
-        desired = repair_massawa_in_town(previous_massawa)
-    else:
-        if pin_ports:
-            desired = move_patches_out_of_video_buffer(desired, original)
-        previous_walking = desired
-        previous_facing = desired
-        previous_town_exit = desired
-        previous_direct = desired
-        previous_protection = desired
-        previous_catalina = desired
-        previous_massawa = desired
-    if image == desired:
-        return
-    if image not in (original, patched, pinned, combat, previous, previous_walking, previous_facing, previous_town_exit,
-                     previous_direct, previous_protection, previous_catalina, previous_massawa,
-                     smooth_town_walking(previous_walking),
-                     keep_daylight_version(original, combat),
-                     move_patches_out_of_video_buffer(open_buildings_at_all_hours(keep_daylight(
-                         patch_ali_voyage(protect_ali_ships(combat)))), original),
-                     move_patches_out_of_video_buffer(
-                         patch_ali_voyage(protect_ali_ships(combat), immune=False), original),
-                     move_patches_out_of_video_buffer(protect_ali_ships(combat), original),
-                     move_patches_out_of_video_buffer(combat, original),
-                     move_patches_out_of_video_buffer(pinned, original)):
-        raise ValueError("游戏副本的 MAIN.EXE 版本不匹配。")
-    backup = exe.with_suffix(".original.EXE")
-    if not backup.exists():
-        with backup.open("xb") as file:
-            file.write(original)
-    replace_game_file(exe, desired)
-
-
-def keep_daylight_version(original, combat):
-    return move_patches_out_of_video_buffer(
-        keep_daylight(patch_ali_voyage(protect_ali_ships(combat))), original)
 
 
 def build_trainer_main(original, features):
@@ -958,19 +796,6 @@ def patch_opening_enter(original):
         raise ValueError("片头程序的按键初始化不匹配。")
     module[start:start + 5] = b"\x90" * 5
     return bytes(header) + bytes(prefix) + bytes(module)
-
-
-def prepare_opening(folder):
-    source = SAVE.parent
-    opening = folder / "OPEN.EXE"
-    original = (source / opening.name).read_bytes()
-    desired = patch_opening_enter(original)
-    if opening.read_bytes() != desired:
-        replace_game_file(opening, desired)
-    launcher = folder / "KOUKAI2.COM"
-    original = (source / launcher.name).read_bytes()
-    if launcher.read_bytes() != original:
-        replace_game_file(launcher, original)
 
 
 def game_hero(state):
@@ -1116,16 +941,14 @@ def deliver_teleport_request(debugger, folder, data_segment, *, coast=False):
         claimed.unlink()
 
 
-def auto_refill(debugger, game, story=None, *, teleport_folder=None, profile=None):
-    if profile is None:
-        print("已启动自动补给。新建角色或读档后会自动生效，无需输入命令。", flush=True)
-    fast = profile is None or "fast" in profile
+def auto_refill(debugger, game, profile, *, teleport_folder=None):
+    fast = "fast" in profile
     ports = ()
-    if profile is not None and "map" in profile:
+    if "map" in profile:
         rows = Path(__file__).with_name("港口坐标.txt").read_text().splitlines()
         ports = [tuple(map(int, row.split("\t", 3)[:3])) for row in rows]
-    unlock_discoveries = profile is not None and "discoveries" in profile
-    route_file = teleport_folder / "story-destinations.json" if profile is not None and "route" in profile else None
+    unlock_discoveries = "discoveries" in profile
+    route_file = teleport_folder / "story-destinations.json" if "route" in profile else None
     if route_file is not None:
         route_ports = read_ports()
         route_coast = CoastMap(SAVE.with_name("WORLDMAP.LZW").read_bytes(),
@@ -1134,8 +957,6 @@ def auto_refill(debugger, game, story=None, *, teleport_folder=None, profile=Non
                        for hero in range(len(HEROES))]
         last_routes = None
         (teleport_folder / "coast-teleport").touch()
-    if story is not None:
-        print("剧情助手已启动。请选择约翰开局，或读入约翰的里斯本开场存档。", flush=True)
     fast_segment = None
     while game.poll() is None:
         # The emulator executes each memory command on its own thread.
@@ -1171,15 +992,13 @@ def auto_refill(debugger, game, story=None, *, teleport_folder=None, profile=Non
             elif not at_sea and fast_segment == code_segment:
                 debugger.write(code_segment, 0xb2b7, b"\x75\xf7")
                 fast_segment = None
-            writes = refill_writes(state, hero) if profile is None else trainer_writes(state, hero, profile)
+            writes = trainer_writes(state, hero, profile)
             if ports:
                 writes.extend(trainer_chart_writes(state, ports))
             if unlock_discoveries:
                 writes.extend(trainer_discovery_writes(state))
             for offset, data in writes:
                 debugger.write(segment, offset, data)
-            if story is not None and fleet is not None:
-                story.tick(debugger, segment, segment - DATA_SEGMENT_DELTA, hero, state[LIVE_BASE:], fleet)
         try:
             game.wait(timeout=0.5)
         except subprocess.TimeoutExpired:
@@ -1200,10 +1019,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("emulator")
     parser.add_argument("game_copy", type=Path)
-    parser.add_argument("--auto", action="store_true")
-    parser.add_argument("--story", action="store_true")
-    parser.add_argument("--live", action="store_true")
-    parser.add_argument("--trainer", action="store_true")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--live", action="store_true", help="终端里手动锁定数值")
+    mode.add_argument("--trainer", action="store_true", help="按修改器开关启动")
     parser.add_argument("--enable", choices=TRAINER_SWITCHES, action="append", default=[])
     parser.add_argument("--fleet-slot", type=int, choices=range(1, 11))
     parser.add_argument("--fleet-ships", type=int, default=10)
@@ -1231,7 +1049,6 @@ def main():
             )
             if "cdosbox-x" in legacy.stdout.splitlines():
                 parser.exit(1, "旧游戏窗口还开着。请先保存并退出，再双击启动器。\n")
-            exe = args.game_copy / "MAIN.EXE"
             if profile is not None:
                 if args.fleet_slot is not None:
                     save_path = args.game_copy / SAVE.name
@@ -1240,58 +1057,8 @@ def main():
                 prepare_trainer(args.game_copy, set(profile))
                 if args.fleet_slot is not None and outfitted != saved:
                     replace_game_file(save_path, outfitted)
-            elif args.live:
-                prepare_trainer(args.game_copy, set())
-            elif args.auto:
-                prepare_provisions(exe, pin_ports=True, ali_combat=True)
-                source = SAVE.with_name("SNR0.DAT")
-                replace_game_file(args.game_copy / source.name, source.read_bytes())
-                prepare_story_hours(args.game_copy)
-                prepare_opening(args.game_copy)
             else:
-                image = exe.read_bytes()
-                original = SAVE.with_name("MAIN.EXE").read_bytes()
-                patched = patch_provisions(original)
-                pinned = pin_navigation_ports(patched)
-                combat = patch_ali_combat(pinned)
-                teleport = move_patches_out_of_video_buffer(
-                    open_buildings_at_all_hours(keep_daylight(
-                        patch_ali_voyage(protect_ali_ships(combat)))), original, teleport=True)
-                voyage = open_buildings_at_all_hours(keep_daylight(
-                    patch_ali_voyage(protect_ali_ships(combat))))
-                direct = move_patches_out_of_video_buffer(voyage, original, town_exit=True, direct=True)
-                repaired_direct = move_patches_out_of_video_buffer(
-                    voyage, original, town_exit=True, direct=True, repair_massawa=True)
-                repaired = enable_catalina_protection(enable_john_protection(repaired_direct))
-                if (hashlib.sha256(image).hexdigest() != ORIGINAL_EXE_SHA256
-                        and image not in (patched, pinned, combat,
-                                          move_patches_out_of_video_buffer(pinned, original),
-                                          move_patches_out_of_video_buffer(combat, original),
-                                          move_patches_out_of_video_buffer(protect_ali_ships(combat), original),
-                                          move_patches_out_of_video_buffer(
-                                              patch_ali_voyage(protect_ali_ships(combat), immune=False), original),
-                                          move_patches_out_of_video_buffer(
-                                              patch_ali_voyage(protect_ali_ships(combat)), original),
-                                          move_patches_out_of_video_buffer(
-                                              keep_daylight(patch_ali_voyage(protect_ali_ships(combat))), original),
-                                          move_patches_out_of_video_buffer(
-                                              open_buildings_at_all_hours(keep_daylight(
-                                                  patch_ali_voyage(protect_ali_ships(combat)))), original),
-                                          teleport, smooth_town_walking(teleport),
-                                          move_patches_out_of_video_buffer(
-                                              open_buildings_at_all_hours(keep_daylight(
-                                                  patch_ali_voyage(protect_ali_ships(combat)))), original,
-                                              town_exit=True),
-                                          direct, enable_john_protection(direct),
-                                          enable_catalina_protection(enable_john_protection(direct)),
-                                          repaired, repair_massawa_in_town(repaired),
-                                          smooth_town_walking(move_patches_out_of_video_buffer(
-                                              open_buildings_at_all_hours(keep_daylight(
-                                                  patch_ali_voyage(protect_ali_ships(combat)))), original,
-                                              teleport=True, facing=True)))):
-                    raise ValueError("游戏副本的 MAIN.EXE 版本不匹配。")
-                if image in (pinned, combat):
-                    prepare_provisions(exe, pin_ports=True, ali_combat=image == combat)
+                prepare_trainer(args.game_copy, set())
             run_game(args, lock, profile=profile)
     except (OSError, ValueError) as error:
         parser.exit(1, f"{error}\n")
@@ -1306,7 +1073,7 @@ def run_game(args, lock, *, profile=None):
         (folder / "game").symlink_to(args.game_copy.resolve(), target_is_directory=True)
         lock.seek(0)
         lock.truncate()
-        teleport = args.auto if profile is None else bool(profile.keys() & {"teleport", "route"})
+        teleport = profile is not None and bool(profile.keys() & {"teleport", "route"})
         if teleport:
             lock.write(str(folder))
         lock.flush()
@@ -1340,10 +1107,7 @@ def run_game(args, lock, *, profile=None):
                 debugger = Debugger(connection, folder, image_shift)
                 try:
                     if profile is not None:
-                        auto_refill(debugger, game, teleport_folder=folder if teleport else None, profile=profile)
-                    elif args.auto:
-                        story = StoryPilot((args.game_copy / "ZA_DAT.DAT").read_bytes()) if args.story else None
-                        auto_refill(debugger, game, story, teleport_folder=folder)
+                        auto_refill(debugger, game, profile, teleport_folder=folder if teleport else None)
                     else:
                         prompt(debugger)
                 finally:

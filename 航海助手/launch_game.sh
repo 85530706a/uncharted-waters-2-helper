@@ -36,4 +36,5 @@ if [ "${1-}" = "--live" ]; then
     exec python3 "$workspace/live.py" "$emulator" "$session" --live
 fi
 
-exec python3 "$workspace/live.py" "$emulator" "$session" --auto "$@"
+echo "用法：launch_game.sh [--original | --live | --trainer 开关…]" >&2
+exit 2
