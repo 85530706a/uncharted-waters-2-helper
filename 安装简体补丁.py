@@ -12,6 +12,7 @@ import zlib
 
 
 # 每项包含原版与简体版 SHA-256，以及只覆盖变更区间的 XOR 数据。
+# 这些数据由原版游戏内容衍生，不在本项目的 MIT 许可范围内，见 README「许可与版权」。
 PATCH_DATA = (
     "c-oZxOOo`s(kuw>CC4cx#2c(x?VtudyV3&^1UJ!}FI6=IogNYS*X{fcjz7Zbq=SGx)ztof|AhbJ|Ng)JKmYun|LdQTMvt?fc"
     "|UpzHSG6x#1{L0hkcfOmNVV^J<=A&v4=CHJ?7ThQSJ*L-Nrxv{*zh_?Jm8aW#-(^bJVl<{o1avZTFp1iX+B!^swa|&#R}>ul"
